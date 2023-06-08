@@ -34,6 +34,11 @@ class RulePart(
     fun repr(): String =
         this.rule?.name ?: this.tokenKind!!.repr ?: this.tokenKind!!.name
 
+    fun first(): Set<RulePart> =
+        if (this.isToken())
+            setOf(this)
+        else
+            this.rule!!.first
 
     override fun toString(): String {
 

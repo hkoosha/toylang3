@@ -2,6 +2,7 @@ package io.koosha.toylang.toylang3.parser.rule
 
 import io.koosha.toylang.toylang3.lexer.TokenKind
 import io.koosha.toylang.toylang3.util.isInt
+import io.koosha.toylang.toylang3.util.removeFirstByOrNull
 import java.util.regex.Pattern
 
 class Rule(
@@ -46,10 +47,11 @@ class Rule(
         return this
     }
 
-
+    @Suppress("unused")
     fun alternatives(): List<List<RulePart>> =
         this.alternatives
 
+    @Suppress("unused")
     fun isToken(): Boolean =
         this.alternatives.size == 1 && this.alternatives[0].size == 1 && this.alternatives[0][0].isToken()
 
@@ -239,6 +241,7 @@ class Rule(
 
     }
 
+
     /**
      * I know! you won't find the most efficient implementations or idioms here!
      */
@@ -246,7 +249,31 @@ class Rule(
 
         private val VALID_RULE_REGEX: Regex = Pattern.compile("^[a-zA-Z0-9_]+$").toRegex()
 
-        fun parse(rulesDef: String): List<Rule> {
+        fun isBacktrackFree(rules: List<Rule>): Boolean {
+
+            rules.forEach { rule ->
+
+                val startSets = mutableSetOf<Set<RulePart>>()
+
+                for (alt: List<RulePart> in rule.alternatives) {
+                    val start: Set<RulePart> =
+                        if (alt[0].first().contains(RulePart.of(TokenKind.Epsilon)))
+                            alt[0].first() - RulePart.of(TokenKind.Epsilon) + rule.follow
+                        else
+                            alt[0].first()
+
+                    if (!startSets.add(start))
+                        return false
+                }
+            }
+
+            return true
+        }
+
+        fun parse(
+            rulesDef: String,
+            eliminateBacktracking: Boolean,
+        ): List<Rule> {
 
             val rules = mutableListOf<RuleIntermediate>()
 
@@ -311,15 +338,180 @@ class Rule(
 
             this.eliminateEpsilon(rules)
             this.eliminateLeftRecursion(rules)
+
+            if (eliminateBacktracking) {
+                this.leftExpansion(rules)
+                this.eliminateBacktracking(rules)
+                this.eliminateDuplicates(rules)
+            }
+
             this.setFirst(rules)
             this.setFollow(rules)
 
             val externalized: List<Rule> = this.toExternal(rules)
             externalized.forEach(Rule::validate)
 
+            val seenName = mutableSetOf<String>()
+            for (rule in externalized)
+                if (!seenName.add(rule.name))
+                    error("duplicate rule name: $rule")
+
+            // val seenRule = mutableSetOf<Set<List<RulePart>>>()
+            // for (rule in externalized)
+            //     if (!seenRule.add(rule.alternatives.toSet()))
+            //         error("duplicate rule: $rule")
+
             return externalized
         }
 
+        private fun leftExpansion(rules: MutableList<RuleIntermediate>) {
+
+            do {
+                var anyChange = false
+
+                rules.forEach { rule: RuleIntermediate ->
+
+                    val expansionPoint: MutableList<RulePartIntermediate>? = rule.alternatives.removeFirstByOrNull {
+                        !it[0].isToken()
+                    }
+
+                    if (expansionPoint != null) {
+
+                        expansionPoint.removeFirst().rule!!.alternatives.forEach { alt: MutableList<RulePartIntermediate> ->
+                            rule.alternatives.add(mutableListOf())
+                            rule.alternatives.last().addAll(alt)
+                            rule.alternatives.last().addAll(expansionPoint)
+                        }
+
+                        anyChange = true
+                    }
+                }
+
+            } while (anyChange)
+        }
+
+        private fun getNewRule(
+            rules: MutableList<RuleIntermediate>,
+            name: String,
+        ): RuleIntermediate {
+
+            if (!VALID_RULE_REGEX.matches(name))
+                error("invalid rule name: $name")
+
+            val namePrefix: String
+            val nameSuffix: Int
+            if (name.contains("_p") && name.split("_p").last().isInt()) {
+                val parts: List<String> = name.split("_p")
+                namePrefix = parts.subList(0, parts.size - 1).joinToString("") + "_p"
+                nameSuffix = parts.last().toInt() + 1
+            }
+            else {
+                namePrefix = name + "_p"
+                nameSuffix = 0
+            }
+
+            val ruleName: String = namePrefix + nameSuffix
+
+            if (rules.findLast { it.name == ruleName } != null)
+                return this.getNewRule(rules, ruleName)
+
+            val rule = RuleIntermediate(name = ruleName, num = rules.maxBy { it.num }.num + 1)
+            rules.add(rule)
+
+            return rule
+        }
+
+
+        private fun eliminateDuplicates(rules: MutableList<RuleIntermediate>) {
+
+            do {
+
+                var foundI: RuleIntermediate? = null
+                var foundJ: RuleIntermediate? = null
+
+                outer@
+                for (i in rules.size - 1 downTo 1)
+                    for (j in i - 1 downTo 0) {
+                        val ruleI = rules[i]
+                        val ruleJ = rules[j]
+
+                        if (ruleI.alternatives.toSet() == ruleJ.alternatives.toSet()) {
+                            foundI = ruleI
+                            foundJ = ruleJ
+                            break@outer
+                        }
+                    }
+
+                if (foundI != null) {
+                    rules.remove(foundJ!!)
+                    rules.forEach { rule: RuleIntermediate ->
+                        rule.alternatives.forEach { alt: MutableList<RulePartIntermediate> ->
+                            alt.replaceAll {
+                                if (it.rule == foundJ)
+                                    RulePartIntermediate.of(foundI)
+                                else
+                                    it
+                            }
+                        }
+                    }
+                }
+
+            } while (foundI != null)
+
+        }
+
+        private fun eliminateBacktracking(rules: MutableList<RuleIntermediate>) {
+
+            var loops = -1
+            do {
+                var newRule: RuleIntermediate? = null
+
+                for (rule: RuleIntermediate in rules) {
+
+                    var foundAlt: MutableList<RulePartIntermediate>? = null
+                    var index = -1
+
+                    foundAlt@
+                    for (alt: MutableList<RulePartIntermediate> in rule.alternatives)
+                        for (comparingAlt: MutableList<RulePartIntermediate> in rule.alternatives)
+                            if (alt !== comparingAlt && alt.size < comparingAlt.size)
+                                for (i in alt.size downTo 1)
+                                    if (alt.subList(0, i) == comparingAlt.subList(0, i)) {
+                                        foundAlt = alt
+                                        index = i
+                                        break@foundAlt
+                                    }
+
+                    if (foundAlt != null) {
+                        val commonPrefix: List<RulePartIntermediate> = foundAlt.toList().subList(0, index)
+
+                        newRule = this.getNewRule(rules, rule.name)
+
+                        for (alt: MutableList<RulePartIntermediate> in rule.alternatives)
+                            if (alt.size >= index && alt.subList(0, index) == commonPrefix) {
+                                val suffix = alt.subList(index, alt.size)
+                                newRule.alternatives.add(mutableListOf())
+                                if (suffix.isEmpty())
+                                    newRule.alternatives.last().add(RulePartIntermediate.EPSILON)
+                                else
+                                    newRule.alternatives.last().addAll(suffix)
+                                alt.clear()
+                            }
+
+                        rule.alternatives.add(mutableListOf())
+                        rule.alternatives.last().addAll(commonPrefix)
+                        rule.alternatives.last().add(RulePartIntermediate.of(newRule))
+
+                        rule.alternatives.retainAll { it.isNotEmpty() }
+
+                        break
+                    }
+                }
+
+                if (newRule != null && loops++ >= 1024)
+                    error("could not eliminate backtracking: $rules")
+            } while (newRule != null)
+        }
 
         // Changes program semantics!! doesn't handle self-referencing rules with epsilons properly.
         // Just removes epsilon on them.
@@ -388,29 +580,6 @@ class Rule(
 
             rules.sort()
 
-            var ruleNum = rules.maxBy { it.num }.num + 1
-
-            val getNewRule: (String) -> RuleIntermediate = { name: String ->
-
-                if (!VALID_RULE_REGEX.matches(name))
-                    error("invalid rule name: $name")
-
-                val ruleName = if (name.contains("_p") && name.split("_p").last().isInt()) {
-                    val parts: List<String> = name.split("_p")
-                    val nameParts: String = parts.subList(0, parts.size - 1).joinToString("")
-                    val nameNum: Int = parts.last().toInt() + 1
-                    nameParts + "_p" + nameNum
-                }
-                else {
-                    name + "_p0"
-                }
-
-                val rule = RuleIntermediate(name = ruleName, num = ruleNum++)
-                rules.add(rule)
-
-                rule
-            }
-
             var round = 0
             val maxRounds = 1024
 
@@ -444,7 +613,7 @@ class Rule(
 
                     if (recursive.isNotEmpty()) {
 
-                        val prime: RuleIntermediate = getNewRule(inspecting.name)
+                        val prime: RuleIntermediate = this.getNewRule(rules, inspecting.name)
 
                         nonRecursive.forEach {
                             // if (it.size != 1 || !it[0].isEpsilon())

@@ -26,10 +26,13 @@ fun main(args: Array<String>) {
         else
             args[0]
 
-    val rules: List<Rule> = Rule.parse(rulesDef)
+    val rules: List<Rule> = Rule.parse(rulesDef, true)
     val maxLen = rules.maxBy { it.name.length }.name.length
     rules.forEach {
         println("${it.name.padEnd(maxLen)}  ===>  ${it.altsToString()}")
     }
+    println()
     rules.forEach(::println)
+
+    println("backtrackFree=${Rule.isBacktrackFree(rules)}")
 }
